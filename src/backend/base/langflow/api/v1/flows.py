@@ -357,13 +357,20 @@ async def upload_file(
         raise HTTPException(status_code=400, detail="No file provided")
 
     contents = await file.read()
+    max_file_size_upload = get_settings_service().settings.max_file_size_upload
+    max_total_uncompressed_bytes = (
+        max_file_size_upload * 1024 * 1024 if max_file_size_upload is not None else None
+    )
 
     if not contents:
         raise HTTPException(status_code=400, detail="The uploaded file is empty")
 
     if zipfile.is_zipfile(io.BytesIO(contents)):
         try:
-            flows_data = await extract_flows_from_zip(contents)
+            flows_data = await extract_flows_from_zip(
+                contents,
+                max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         if not flows_data:

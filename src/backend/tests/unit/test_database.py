@@ -14,7 +14,7 @@ from langflow.services.database.models.base import orjson_dumps
 from langflow.services.database.models.flow import Flow, FlowCreate, FlowUpdate
 from langflow.services.database.models.folder.model import FolderCreate
 from langflow.services.database.utils import session_getter
-from langflow.services.deps import get_db_service
+from langflow.services.deps import get_db_service, get_settings_service
 from lfx.graph.utils import log_transaction, log_vertex_build
 
 
@@ -864,6 +864,94 @@ async def test_upload_zip_with_mixed_valid_invalid(client: AsyncClient, json_flo
     response_data = response.json()
     assert len(response_data) == 1
     assert response_data[0]["name"] == "keeper"
+
+
+@pytest.mark.usefixtures("session")
+async def test_upload_zip_rejects_aggregate_uncompressed_size_above_request_limit(
+    client: AsyncClient,
+    json_flow: str,
+    logged_in_headers,
+    monkeypatch,
+):
+    """ZIP imports should reject archives whose total uncompressed JSON exceeds the request-size limit.
+
+    This closes the gap where a highly compressed archive could stay under the middleware
+    body-size cap while expanding to a much larger aggregate payload during extraction.
+    """
+    settings_service = get_settings_service()
+    monkeypatch.setattr(settings_service.settings, "max_file_size_upload", 1)  # 1 MB total
+
+    flow = orjson.loads(json_flow)
+    base_data = flow["data"]
+    per_entry_padding_bytes = 200 * 1024
+    entry_count = 8
+
+    zip_buffer = io.BytesIO()
+    uncompressed_total = 0
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for i in range(entry_count):
+            payload = {
+                "name": f"aggregate-flow-{uuid4()}",
+                "description": "aggregate guard",
+                "data": {**base_data, "padding": "A" * per_entry_padding_bytes},
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            uncompressed_total += len(raw)
+            zf.writestr(f"flow_{i}.json", raw)
+    zip_bytes = zip_buffer.getvalue()
+
+    assert len(zip_bytes) < 1 * 1024 * 1024
+    assert uncompressed_total > 1 * 1024 * 1024
+
+    response = await client.post(
+        "api/v1/flows/upload/",
+        files={"file": ("aggregate.zip", zip_bytes, "application/zip")},
+        headers=logged_in_headers,
+    )
+    assert response.status_code == 400
+    assert "total uncompressed" in response.json()["detail"]
+
+
+@pytest.mark.usefixtures("session")
+async def test_upload_project_zip_rejects_aggregate_uncompressed_size_above_request_limit(
+    client: AsyncClient,
+    json_flow: str,
+    logged_in_headers,
+    monkeypatch,
+):
+    """Project ZIP uploads should apply the same aggregate uncompressed guard as flows upload."""
+    settings_service = get_settings_service()
+    monkeypatch.setattr(settings_service.settings, "max_file_size_upload", 1)  # 1 MB total
+
+    flow = orjson.loads(json_flow)
+    base_data = flow["data"]
+    per_entry_padding_bytes = 200 * 1024
+    entry_count = 8
+
+    zip_buffer = io.BytesIO()
+    uncompressed_total = 0
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for i in range(entry_count):
+            payload = {
+                "name": f"aggregate-project-flow-{uuid4()}",
+                "description": "aggregate guard",
+                "data": {**base_data, "padding": "A" * per_entry_padding_bytes},
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            uncompressed_total += len(raw)
+            zf.writestr(f"flow_{i}.json", raw)
+    zip_bytes = zip_buffer.getvalue()
+
+    assert len(zip_bytes) < 1 * 1024 * 1024
+    assert uncompressed_total > 1 * 1024 * 1024
+
+    response = await client.post(
+        "api/v1/projects/upload/",
+        files={"file": ("aggregate-project.zip", zip_bytes, "application/zip")},
+        headers=logged_in_headers,
+    )
+    assert response.status_code == 400
+    assert "total uncompressed" in response.json()["detail"]
 
 
 @pytest.mark.usefixtures("session")

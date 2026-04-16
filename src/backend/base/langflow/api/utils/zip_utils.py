@@ -23,7 +23,7 @@ class _ZipExtractionResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _extract_flows_sync(contents: bytes) -> _ZipExtractionResult:
+def _extract_flows_sync(contents: bytes, *, max_total_uncompressed_bytes: int | None = None) -> _ZipExtractionResult:
     """Synchronous helper that performs all blocking ZIP I/O.
 
     Raises:
@@ -44,7 +44,21 @@ def _extract_flows_sync(contents: bytes) -> _ZipExtractionResult:
             msg = f"ZIP contains {len(json_entries)} JSON entries, exceeding the limit of {MAX_ZIP_ENTRIES}"
             raise ValueError(msg)
 
+        total_declared_uncompressed_bytes = 0
+        total_actual_uncompressed_bytes = 0
+
         for info in json_entries:
+            total_declared_uncompressed_bytes += info.file_size
+            if (
+                max_total_uncompressed_bytes is not None
+                and total_declared_uncompressed_bytes > max_total_uncompressed_bytes
+            ):
+                msg = (
+                    "ZIP total uncompressed size exceeds the allowed limit of "
+                    f"{max_total_uncompressed_bytes} bytes"
+                )
+                raise ValueError(msg)
+
             if info.file_size > MAX_ENTRY_UNCOMPRESSED_BYTES:
                 result.warnings.append(
                     f"Skipping ZIP entry '{info.filename}': uncompressed size "
@@ -53,6 +67,16 @@ def _extract_flows_sync(contents: bytes) -> _ZipExtractionResult:
                 continue
             try:
                 raw = zf.read(info.filename)
+                total_actual_uncompressed_bytes += len(raw)
+                if (
+                    max_total_uncompressed_bytes is not None
+                    and total_actual_uncompressed_bytes > max_total_uncompressed_bytes
+                ):
+                    msg = (
+                        "ZIP extracted payload exceeds the allowed total uncompressed limit of "
+                        f"{max_total_uncompressed_bytes} bytes"
+                    )
+                    raise ValueError(msg)
                 if len(raw) > MAX_ENTRY_UNCOMPRESSED_BYTES:
                     result.warnings.append(
                         f"Skipping ZIP entry '{info.filename}': actual size "
@@ -67,7 +91,7 @@ def _extract_flows_sync(contents: bytes) -> _ZipExtractionResult:
     return result
 
 
-async def extract_flows_from_zip(contents: bytes) -> list[dict]:
+async def extract_flows_from_zip(contents: bytes, *, max_total_uncompressed_bytes: int | None = None) -> list[dict]:
     """Extract flow JSON data from a ZIP file.
 
     Reads all .json files from the ZIP archive and returns their parsed contents.
@@ -77,7 +101,11 @@ async def extract_flows_from_zip(contents: bytes) -> list[dict]:
     Raises:
         ValueError: If the ZIP is corrupt or contains more than MAX_ZIP_ENTRIES JSON files.
     """
-    result = await asyncio.to_thread(_extract_flows_sync, contents)
+    result = await asyncio.to_thread(
+        _extract_flows_sync,
+        contents,
+        max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+    )
 
     for warning in result.warnings:
         await logger.awarning(warning)
